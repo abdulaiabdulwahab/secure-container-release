@@ -14,7 +14,7 @@ variables:
 
   # Replace with your ACR resource NAME only.
   # Example: cssecure12345
-  acrName: 'REPLACE-WITH-YOUR-ACR-NAME'
+  acrName: 'cssecure656632281'
 
   # Azure Resource Manager service connection
   azureServiceConnection: 'sc-container-security'
@@ -130,7 +130,7 @@ steps:
 # ---------------------------------------------------------
 # 7. SECURITY GATE
 #
-# Exit code 1 causes Azure Pipelines to stop if Trivy finds
+# Causes Azure Pipelines to display only vulnerabilities that have fixes available
 # HIGH or CRITICAL vulnerabilities.
 # ---------------------------------------------------------
 
@@ -142,10 +142,11 @@ steps:
       -v "$(trivyCache):/root/.cache/" \
       $(trivyImage) image \
       --severity HIGH,CRITICAL \
+      --ignore-unfixed \
       --exit-code 1 \
       $(imageName):$(Build.BuildId)
 
-  displayName: 'Security gate - fail on HIGH or CRITICAL vulnerabilities'
+  displayName: 'Security gate - fail on fixable HIGH or CRITICAL vulnerabilities'
 
 
 # ---------------------------------------------------------

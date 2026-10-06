@@ -1,0 +1,22 @@
+# Git metadata
+.git
+.gitignore
+
+# Environment and secrets
+.env
+.env.*
+*.pem
+*.key
+
+# Python
+__pycache__
+*.pyc
+venv/
+.venv/
+
+# Reports
+sbom*.json
+trivy*.json
+
+# Documentation
+*.md

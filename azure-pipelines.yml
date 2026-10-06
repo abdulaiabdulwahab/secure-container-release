@@ -1,0 +1,217 @@
+trigger:
+  branches:
+    include:
+      - main
+
+pool:
+  vmImage: ubuntu-latest
+
+
+variables:
+
+  # Container image name
+  imageName: 'secure-api'
+
+  # Replace with your ACR resource NAME only.
+  # Example: cssecure12345
+  acrName: 'REPLACE-WITH-YOUR-ACR-NAME'
+
+  # Azure Resource Manager service connection
+  azureServiceConnection: 'sc-container-security'
+
+  # Official Trivy container
+  trivyImage: 'aquasec/trivy:latest'
+
+  # Persistent cache directory for the pipeline run
+  trivyCache: '$(Pipeline.Workspace)/trivy-cache'
+
+
+steps:
+
+# ---------------------------------------------------------
+# 1. DOWNLOAD SOURCE
+# ---------------------------------------------------------
+
+- checkout: self
+
+  displayName: 'Checkout source code'
+
+
+# ---------------------------------------------------------
+# 2. BUILD IMAGE
+#
+# We deliberately build locally first.
+# The image should NOT reach ACR until it passes security.
+# ---------------------------------------------------------
+
+- script: |
+
+    set -euo pipefail
+
+    docker build \
+      --pull \
+      -t $(imageName):$(Build.BuildId) \
+      .
+
+  displayName: 'Build container image'
+
+
+# ---------------------------------------------------------
+# 3. PREPARE SECURITY REPORT DIRECTORY
+# ---------------------------------------------------------
+
+- script: |
+
+    mkdir -p "$(Build.SourcesDirectory)/security-results"
+
+    mkdir -p "$(trivyCache)"
+
+  displayName: 'Prepare security directories'
+
+
+# ---------------------------------------------------------
+# 4. GENERATE FULL TRIVY REPORT
+#
+# This does NOT fail the pipeline.
+# Its purpose is reporting.
+# ---------------------------------------------------------
+
+- script: |
+
+    docker run \
+      --rm \
+      -v /var/run/docker.sock:/var/run/docker.sock \
+      -v "$(trivyCache):/root/.cache/" \
+      -v "$(Build.SourcesDirectory)/security-results:/reports" \
+      $(trivyImage) image \
+      --format json \
+      --output /reports/trivy-report.json \
+      $(imageName):$(Build.BuildId)
+
+  displayName: 'Generate vulnerability report'
+
+
+# ---------------------------------------------------------
+# 5. GENERATE SBOM
+# ---------------------------------------------------------
+
+- script: |
+
+    docker run \
+      --rm \
+      -v /var/run/docker.sock:/var/run/docker.sock \
+      -v "$(trivyCache):/root/.cache/" \
+      -v "$(Build.SourcesDirectory)/security-results:/reports" \
+      $(trivyImage) image \
+      --format cyclonedx \
+      --output /reports/sbom.cdx.json \
+      $(imageName):$(Build.BuildId)
+
+  displayName: 'Generate CycloneDX SBOM'
+
+
+# ---------------------------------------------------------
+# 6. PUBLISH SECURITY EVIDENCE
+#
+# The reports become downloadable Azure Pipeline artifacts.
+# ---------------------------------------------------------
+
+- task: PublishPipelineArtifact@1
+
+  displayName: 'Publish container security reports'
+
+  inputs:
+
+    targetPath: '$(Build.SourcesDirectory)/security-results'
+
+    artifact: 'container-security-results'
+
+
+# ---------------------------------------------------------
+# 7. SECURITY GATE
+#
+# Exit code 1 causes Azure Pipelines to stop if Trivy finds
+# HIGH or CRITICAL vulnerabilities.
+# ---------------------------------------------------------
+
+- script: |
+
+    docker run \
+      --rm \
+      -v /var/run/docker.sock:/var/run/docker.sock \
+      -v "$(trivyCache):/root/.cache/" \
+      $(trivyImage) image \
+      --severity HIGH,CRITICAL \
+      --exit-code 1 \
+      $(imageName):$(Build.BuildId)
+
+  displayName: 'Security gate - fail on HIGH or CRITICAL vulnerabilities'
+
+
+# ---------------------------------------------------------
+# 8. PUSH TO ACR
+#
+# This step can execute ONLY if the security gate passed.
+# ---------------------------------------------------------
+
+- task: AzureCLI@2
+
+  displayName: 'Push approved image to ACR'
+
+  inputs:
+
+    azureSubscription: '$(azureServiceConnection)'
+
+    scriptType: bash
+
+    scriptLocation: inlineScript
+
+    inlineScript: |
+
+      set -euo pipefail
+
+      # Discover the registry login server.
+      LOGIN_SERVER=$(az acr show \
+        --name "$(acrName)" \
+        --query loginServer \
+        --output tsv)
+
+      echo "Registry: $LOGIN_SERVER"
+
+      # Authenticate with the service connection identity.
+      az acr login \
+        --name "$(acrName)"
+
+      # Tag the approved image.
+      docker tag \
+        $(imageName):$(Build.BuildId) \
+        "$LOGIN_SERVER/$(imageName):$(Build.BuildId)"
+
+      # Push only after Trivy succeeded.
+      docker push \
+        "$LOGIN_SERVER/$(imageName):$(Build.BuildId)"
+
+
+# ---------------------------------------------------------
+# 9. VERIFY THE RELEASE
+# ---------------------------------------------------------
+
+- task: AzureCLI@2
+
+  displayName: 'Verify image in ACR'
+
+  inputs:
+
+    azureSubscription: '$(azureServiceConnection)'
+
+    scriptType: bash
+
+    scriptLocation: inlineScript
+
+    inlineScript: |
+
+      az acr repository show-tags \
+        --name "$(acrName)" \
+        --repository "$(imageName)" \
+        --orderby time_desc \
+        --output table

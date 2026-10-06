@@ -1,5 +1,5 @@
 # Use a smaller production base image.
-FROM python:3.12-slim-bookworm
+FROM python:3.12-slim-trixie
 
 # Prevent creation of .pyc files.
 ENV PYTHONDONTWRITEBYTECODE=1
